@@ -1,0 +1,961 @@
+#include <iostream>
+#include <fstream>
+#include <string>
+#include <vector>
+#include <cstdlib>
+#include <cstring>
+#include <cmath>
+#include <stdio.h>
+#include <time.h>
+#include <stdlib.h>
+#include <algorithm>
+#include <string.h>
+#include <windows.h>
+#include <iomanip>
+
+#define STR 7
+#define VALUE 6
+#define LABEL 5 
+#define DEL 4
+#define REG 3
+#define PSEUDO 2
+#define INSTRUCTION 1
+#define MAX_REMAIN_TOKENS 30  // 除了指令、label外的tokens最大個數
+
+ 
+using namespace std ;
+
+typedef char STRING20 [20];
+typedef char STRING200 [200];
+typedef struct tableNode{
+	string content ;           //token
+} tableNode;
+typedef struct aLineOfToken{
+	STRING200 originLine ;
+	int amount ;    // 這行指令token個數 
+	STRING20 tokenArray[MAX_REMAIN_TOKENS] ; //這行指令所有token 
+	int tokenTableArray[MAX_REMAIN_TOKENS] ; //這行指令所有token的table號 
+	aLineOfToken(){
+		amount = 0 ;
+		strcpy( originLine, "\0" ) ;
+	}
+} aLineOfToken;
+//第一階段分類->label和instruction 
+typedef struct classified1{
+	STRING20 label ;
+	STRING20 instruction ;
+	aLineOfToken remain ;
+} classified1;
+
+class Tool{
+	public :
+	int GetInt() {
+  		// ans是等一下要回傳的，-1代表此輸入錯誤! 
+		int ans = 0 ;
+		string untreat ;
+	
+		getline( cin, untreat );
+		for( int i = 0 ; untreat[i] != '\0' ; i++ )
+	    	if ( untreat[i] < '0' || untreat[i] > '9' )
+	    		ans = -1;
+	       
+    	if ( ans != -1 )
+    		ans = atoi(untreat.c_str());
+    	return ans;
+	}
+	// 二進位字串轉16進位數字
+	string binStrToHex( string in ){
+		string temp = in ;
+		int dec = 0, hex = 0 ;
+		char ans[200] ;
+		for( int i = temp.length()-1 ; i >= 0 ; i-- ){
+			dec = dec + ( temp[i] - 48 ) * pow(2, hex);
+			hex++;
+		}
+		itoa( dec, ans, 16 ) ;
+		return ans ;
+	} /*
+	STRING20 fullBit( string str, int length ){
+		for( int i = 0 ; )
+	}*/
+};
+#define SREG 11
+#define MEMORY 12
+typedef struct classify_group{
+    int type ;  // REG,SERG,VALUE,MEMORY
+
+    //REG
+	// 編號: 0 AL 1 CL 2 DL 3 BL 4 AH 5 CH 6 DH 7 BH
+	// 編號: 0 AX 1 CX 2 DX 3 BX 4 SP 5 BP 6 SI 7 DI 
+    STRING20 regNum;//暫存器編號，
+    int regByte;//暫存器寬度(bytes 數)，例如 AX 是 2，BL 是 1
+
+    //SREG
+    // 編號: 0 ES 1 CS 2 SS 3 DS 
+    STRING20 sregNum;//段暫存器編號，
+
+    //VALUE，用這個欄位來紀錄其相關資訊
+    STRING20 value; //用來記錄其值
+
+    //MEMORY 
+    int memByte;  //寬度，如果有指定 WORD PTR 或 BYTE PTR 則設定為 2 或 1 、沒有指定則設為 0 
+    int memSeg; //是否有指定段？沒有的話為 0，有則設定為其機器碼，如 CS: 設為 2EH
+    STRING20 memMode;// MODE
+    STRING20 memRm; // R/M
+    int memDisp; //如果包含數字，其值紀錄於此
+    int R ; // 需要重定位 1，否則 0(重定位在最後機器碼後面要直接加 R) 
+    STRING20 memSymbol; //如果包含 Symbol，其字串紀錄於此
+    
+    classify_group(){
+    	type = 0 ;
+	    regByte = 0 ;
+	    memByte = 0 ; 
+	    memSeg = 0 ;
+	    memDisp = 0 ; 
+    	strcpy( regNum, "\0" ) ;
+    	strcpy( sregNum, "\0" ) ;
+    	strcpy( value, "\0" ) ;
+     	strcpy( memMode, "\0" ) ;
+    	strcpy( memRm, "\0" ) ; 
+    	strcpy( memSymbol, "\0" ) ;
+	}
+    
+}classify_group;
+struct LineMachineCode{
+	int byte ;
+	int address ;
+    bool forward_ref; //記載是否需要 forward reference
+    STRING200 code; //以字串形式記載機器碼，例如 MOV BL,AL 的機器碼記成 "88C3"
+    STRING200 origin ;//存原本的字串 
+
+    //這裡記錄著 Translator 所吃進來的 packed token
+    //這是為了將來解決 forward reference 所預留的
+    classified1 reserved ;
+    STRING20 relocate ;
+    LineMachineCode(){
+    	byte = 0 ;
+    	address = 0 ; 
+    	forward_ref = false ;
+    	strcpy( code, "\0" ) ;
+    	strcpy( relocate, "\0" ) ;
+	}
+};
+class Translator{
+	private:
+		vector<LineMachineCode> machineCode ;
+		int startingAddress ;
+		// 輸出
+		fstream outFile ;
+		string outFileName ;
+	public:
+		Translator(){
+			startingAddress = 0 ;
+			outFileName = "x86_output.txt" ;
+		}
+		void MOVtranslator( STRING200 line, vector<classify_group> operand, classified1 saved ){
+			LineMachineCode newNode ;
+			Tool tool ;
+			string insMachineCode ;
+			strcpy( newNode.origin, line ) ;
+			// 判斷屬於哪種格式的mov
+			int op1 = 0, op2 = 0 ; //reg = 1, mem = 2, imm = 3, acc = 4, seg = 5
+			for( int i = 0 ; i < operand.size() ; i++ ){
+				if( operand[i].type == REG ){
+					if( op1 == 0 ){
+						op1 = 1 ;
+					}
+					else if( op2 == 0 ){
+						op2 = 1 ;
+					}
+					else
+						cout << "Error!!! No such type " << endl ;
+				}	
+				else if( operand[i].type == MEMORY ){
+					if( op1 == 0 )
+						op1 = 2 ;
+					else if( op2 == 0 ){
+						op2 = 2 ;
+					}
+					else
+						cout << "Error!!! No such type " << endl ;
+				}
+				//立即值 
+				else if( operand[i].type == VALUE ){
+					if( op1 == 0 )
+						op1 = 3 ;
+					else if( op2 == 0 ){
+						op2 = 3 ;
+					}
+					else
+						cout << "Error!!! No such type " << endl ;
+				}
+				else if( operand[i].type == SREG ){
+					if( op1 == 0 )
+						op1 = 5 ;
+					else if( op2 == 0 ){
+						op2 = 5 ;
+					}
+					else
+						cout << "Error!!! No such type " << endl ;
+				}
+				else
+					cout << "Error!!! No such type " << endl ; 
+			} 
+			// reg/mem to reg
+			if( ( op2 == 1 || op2 == 2 )&&( op1 == 1 )){
+				// 前兩byte 100010dw
+				STRING20 byte1 = "8" ;
+				STRING20 byte2 ;
+				if( operand[0].regByte == 2 )
+					strcpy( byte2, "B" ) ;
+				else
+					strcpy( byte2, "A" );
+				//mod reg rm
+				STRING20 byte3 ;
+				STRING20 byte4 ;
+				STRING20 location ;
+				strcpy( location, "\0" ) ;
+				if( op2 == 1 ){
+					//都是reg
+					strcpy( byte3, "11" ) ;
+					strcat( byte3, operand[0].regNum ) ;
+					byte3[4] = '\0' ;
+					
+					strcpy( byte4, operand[0].regNum ) ;
+					byte4[0] = byte4[2] ;
+					byte4[1] = '\0' ;
+					byte4[2] = '\0' ;
+					strcat( byte4, operand[1].regNum ) ;	
+					newNode.byte = 2 ;
+				}
+				else{
+					//op2是mem 
+					strcpy( byte3, operand[1].memMode ) ;
+					strcat( byte3, operand[0].regNum ) ;
+					byte3[4] = '\0' ;
+					
+					strcpy( byte4, operand[0].regNum ) ;
+					byte4[0] = byte4[2] ;
+					byte4[1] = '\0' ;
+					byte4[2] = '\0' ;
+					strcat( byte4, operand[1].memRm ) ;	
+					if( operand[1].R == 1 ){
+						strcpy( location, "0000 R" ) ;
+					}
+					strcpy( newNode.relocate, operand[1].memSymbol ) ;
+					newNode.byte = 4 ;
+				}
+				// reg -> op1，r/m -> op2 、 w -> op1、op2都一樣 
+				//cout  << byte1 << byte2 << tool.binStrToHex( byte3 ) << tool.binStrToHex( byte4 ) << location << endl ; 
+				strcpy( newNode.code, byte1 ) ;
+				strcat( newNode.code, byte2 ) ;
+				strcat( newNode.code, " " ) ;   
+				strcat( newNode.code, tool.binStrToHex( byte3 ).c_str() ) ;
+				strcat( newNode.code, tool.binStrToHex( byte4 ).c_str() ) ;
+				strcat( newNode.code, " " ) ;    
+				strcat( newNode.code, location ) ;   
+			}
+			// imm to reg
+			else if( op2 == 3 && op1 == 1 ){
+				// 前兩byte 1011w reg
+				STRING20 byte1 = "B" ;
+				STRING20 byte2 ;
+				STRING20 byte3 ;
+				// w=1
+				if( operand[0].regByte == 2 ){
+					strcpy( byte2, "1" ) ;
+					strcat( byte2, operand[0].regNum ) ;
+					strcpy( byte3, operand[1].value ) ;
+					newNode.byte = 3 ;
+				}
+				// w=0
+				else{
+					strcpy( byte2, "0" ) ;
+					strcat( byte2, operand[0].regNum ) ;
+					strcpy( byte3, operand[1].value ) ;
+					newNode.byte = 2 ;
+				}
+				//cout  << byte1 << tool.binStrToHex( byte2 ) << byte3 << endl ; 
+				strcpy( newNode.code, byte1 ) ;
+				strcat( newNode.code, tool.binStrToHex( byte2 ).c_str() ) ;
+				strcat( newNode.code, " " ) ;   
+				strcat( newNode.code, byte3 ) ;  
+			}
+			// imm to reg/mem
+			else if( op2 == 3 &&( op1 == 1 || op1 == 2 )){
+				insMachineCode = "1100011" ;
+			}
+			// mem to acc
+			else if( op2 == 2 && op1 == 4 ){
+				insMachineCode = "1010000";
+			}
+			// acc to mem
+			else if( op2 == 4 && op1 == 2 ){
+				insMachineCode = "1010001";
+			}
+			// reg/mem to seg
+			else if( ( op2 == 1 || op2 == 2 )&& op1 == 5 ){
+				// 前兩byte 10001110
+				STRING20 byte1 = "8" ;
+				STRING20 byte2 = "E" ;
+				//mod reg rm
+				STRING20 byte3 ;
+				STRING20 byte4 ;
+				if( op2 == 1 ){
+					strcpy( byte3, "110" ) ;
+					strcat( byte3, operand[0].sregNum ) ;
+					byte3[4] = '\0' ;
+					
+					strcpy( byte4, operand[0].sregNum ) ;
+					byte4[0] = byte4[1] ;
+					byte4[1] = '\0' ;
+					strcat( byte4, operand[1].regNum ) ;
+					newNode.byte = 2;	
+				}
+				else{
+					cout << "Find mod table!" << endl ;
+					newNode.byte = 4;
+					/*//op2是mem 
+					strcpy( byte3, operand[1].memMode ) ;
+					strcat( byte3, operand[0].regNum ) ;
+					byte3[4] = '\0' ;	*/
+				}
+				// reg -> op1，r/m -> op2 、 w -> op1、op2都一樣 
+				//cout  << byte1 << byte2 << tool.binStrToHex( byte3 ) << tool.binStrToHex( byte4 ) << endl ; 
+				
+				strcpy( newNode.code, byte1 ) ;
+				strcat( newNode.code, byte2 ) ;
+				strcat( newNode.code, " " ) ;   
+				strcat( newNode.code, tool.binStrToHex( byte3 ).c_str() ) ; 
+				strcat( newNode.code, tool.binStrToHex( byte4 ).c_str() ) ; 
+			}
+			//seg to reg/mem
+			else if( op2 == 5 &&( op1 == 1 || op1 == 2 )){
+				insMachineCode = "10001100";
+			}
+			else{
+				cout << "Error!!! No such type " << endl ;
+			}
+			newNode.reserved = saved ;
+			machineCode.push_back( newNode ) ;
+
+		}
+		void CALLtranslator( STRING200 line, vector<classify_group> operand, classified1 saved ){
+			LineMachineCode newNode ;
+			strcpy( newNode.origin, line ) ;
+			newNode.byte = 3 ;
+			if( operand.size() == 1 ){
+				if( operand[0].type == LABEL ){
+					//direct within segment
+					STRING20 byte1 = "E8" ;
+					strcpy( newNode.code, byte1 ) ;
+					//後面的地址等等在找 
+					newNode.forward_ref = true ;
+					strcpy( newNode.relocate, operand[0].memSymbol ) ;
+				}
+			}
+			newNode.reserved = saved ;
+			machineCode.push_back( newNode ) ;	
+		}
+		void INTtranslator( STRING200 originline, vector<classify_group> operand, classified1 saved ){
+			LineMachineCode newNode ;
+			strcpy( newNode.origin, originline ) ;
+			newNode.byte = 2 ;
+			if( operand[0].type == VALUE ){
+				STRING200 byte1 = "CD" ;
+				STRING200 byte2 = "\0" ;
+				// 存數字 
+				for( int i = 0 ; i < strlen( operand[0].value ) ; i++ ){
+					byte2[i] = operand[0].value[i] ;
+				}
+				strcpy( newNode.code, byte1 ) ;
+				strcat( newNode.code, " " ) ;
+				strcat( newNode.code, byte2 ) ;
+			}
+			else{
+				cout << "Sorry~No type3~~" << endl ;
+			}
+			newNode.reserved = saved ;
+			machineCode.push_back( newNode ) ;
+		}
+		void translate( STRING200 originline, classified1 line, vector<classify_group> operand ){
+			if( strcasecmp( line.instruction, "MOV" ) == 0 ){
+				MOVtranslator( originline, operand, line ) ;
+			}
+			else if( strcasecmp( line.instruction, "CALL" ) == 0 ){
+				CALLtranslator( originline, operand, line ) ;
+			}
+			else if( strcasecmp( line.instruction, "INT" ) == 0 ){
+				INTtranslator( originline, operand, line ) ;
+			}
+			else if( strcasecmp( line.instruction, "ORG" ) == 0 ){
+				LineMachineCode newNode ;
+				strcpy( newNode.origin, originline ) ;
+				int i = 0, hex = 0 ;
+				while( operand[0].value[i] != '\0' )
+					i++;
+				for( i = i - 1 ; i >= 0 ; i-- ){
+					startingAddress = startingAddress + ( operand[0].value[i] - 48 )* pow(16, hex) ;
+					hex++ ;
+				}
+				newNode.reserved = line ;
+				machineCode.push_back( newNode ) ;
+			}
+			else if( strcasecmp( line.instruction, "PROC" ) == 0 || strcasecmp( line.instruction, "END" ) == 0 || 
+			         strcasecmp( line.instruction, "ENDP" ) == 0 || strcasecmp( line.instruction, "ENDS" ) == 0 ||
+					 strcasecmp( line.instruction, "SEGMENT" ) == 0 || strcasecmp( line.instruction, "CODE" ) == 0 ||
+					 strcasecmp( line.instruction, "ASSUME" ) == 0 ){
+				LineMachineCode newNode ;
+				if( machineCode.size() > 0 )
+					newNode.address = machineCode[machineCode.size()-1].address ;
+				else 
+					newNode.address = startingAddress ;
+				strcpy( newNode.origin, originline ) ;
+				newNode.reserved = line ;
+				machineCode.push_back( newNode ) ;
+			}
+			else if( strcasecmp( line.instruction, "BYTE" ) == 0 ){
+				//直接把字串換成ascii 
+				LineMachineCode newNode ;
+				strcpy( newNode.code, "\0" ) ;
+				int i = 0 ;
+				for( ; i < strlen(operand[0].value) ; i++ ){
+					int aByte = operand[0].value[i] ;
+					char temp[20] ;
+					itoa( aByte, temp, 16) ;
+					strcat( newNode.code, temp ) ;
+					strcat( newNode.code, " " ) ;
+				}
+				newNode.byte = i ;
+				strcpy( newNode.origin, originline ) ;
+				newNode.reserved = line ;
+				machineCode.push_back( newNode ) ;
+			}
+		}
+		//設定所有指令位置 
+		void addAddress( ){
+			int nowAddress = 0 ;
+			for( int i = 0 ; i < machineCode.size() ; i++ ){
+				machineCode[i].address = nowAddress ;
+				nowAddress = nowAddress + machineCode[i].byte ;
+			}
+		}
+		void addForwardRef(){
+			bool isFound = false ;
+			for( int i = 0 ; i < machineCode.size() ; i++ ){
+				//有forward ref. 
+				if( machineCode[i].forward_ref ){
+					//找出原址位置 
+					isFound = false ;
+					for( int j = 0 ; isFound == false && j < machineCode.size() ; j++ ){
+						if( strcmp( machineCode[j].reserved.label, machineCode[i].relocate ) == 0 ) {
+							isFound = true ;
+							char addTemp[20] ;
+							itoa( machineCode[j].address, addTemp, 16 ) ;
+							strcat( machineCode[i].code, " " );	
+							for( int n = strlen( addTemp ) ; n < 4 ; n++ )
+								strcat( machineCode[i].code, "0" );
+							strcat( machineCode[i].code, addTemp );
+						}
+					} 
+						
+				}
+			}			
+		}
+
+		void PrintResult(){
+			outFile.open( outFileName.c_str(), fstream::out );
+			for( int i = 0 ; i < machineCode.size() ; i++ ){
+				outFile << " " << hex << uppercase << *right << setw(4) << setfill( '0' ) ;
+				outFile << machineCode[i].address << "   " << left << setw(21) << setfill( ' ' ) ;
+				outFile << dec << machineCode[i].code << machineCode[i].origin << endl;
+				
+			}
+			outFile.close() ;			
+		}
+	
+};
+class Classify_remain{
+	private:
+		vector<classify_group> divideRemain ;
+	public:
+		Classify_remain(){
+			
+		}	
+		// 分出每一行remain的reg、seg、value、mem 
+		void packer( aLineOfToken remain ){
+			for( int i = 0, n = 0 ; i < remain.amount ; i++ ){
+				n++ ;
+				cout << "GROUP" << n << " : " ; 
+				classify_group newNode ;
+				aLineOfToken temp ;
+				// 用，分開group 
+				for( int j = 0 ; i < remain.amount && strcmp( remain.tokenArray[i], "," ) != 0 ; j++, i++ ){
+					cout << remain.tokenArray[i] << " " ;
+					temp.amount++ ;
+					strcpy( temp.tokenArray[j], remain.tokenArray[i] ) ;
+					temp.tokenTableArray[j] = remain.tokenTableArray[i] ;					
+				}
+				cout << endl ;
+				for( int group = 0 ; group < temp.amount ; group++ ){
+					if( temp.amount == 1 ){
+						// 只有一個暫存器->不是memory 
+						if( temp.tokenTableArray[group] == REG ){
+							//seg
+							if( strcmp( temp.tokenArray[group], "CS" ) == 0 || strcmp( temp.tokenArray[group], "DS" ) == 0
+								|| strcmp( temp.tokenArray[group], "ES" ) == 0 || strcmp( temp.tokenArray[group], "SS" ) == 0 ){
+								newNode.type = SREG ;
+								if( strcmp( temp.tokenArray[group], "ES" ) == 0 )
+									strcpy( newNode.sregNum, "00" ) ;
+								else if( strcmp( temp.tokenArray[group], "CS" ) == 0 )
+									strcpy( newNode.sregNum, "01" ) ;
+								else if( strcmp( temp.tokenArray[group], "SS" ) == 0 )
+									strcpy( newNode.sregNum, "10" ) ;
+								else 
+									strcpy( newNode.sregNum, "11" ) ;
+								cout << "  TYPE=>" << newNode.type << "\n  NO=>" << newNode.sregNum << endl;
+							}
+							//reg
+							else{
+								newNode.type = REG ;
+								if( strcmp( temp.tokenArray[group], "AH" ) == 0 )
+									strcpy( newNode.regNum, "100" ), newNode.regByte = 1 ;
+								else if( strcmp( temp.tokenArray[group], "AL" ) == 0 )
+									strcpy( newNode.regNum, "000" ), newNode.regByte = 1 ;
+								else if( strcmp( temp.tokenArray[group], "AX" ) == 0 )
+									strcpy( newNode.regNum, "000" ), newNode.regByte = 2 ;
+								else if( strcmp( temp.tokenArray[group], "BH" ) == 0 )
+									strcpy( newNode.regNum, "111" ), newNode.regByte = 1 ;
+								else if( strcmp( temp.tokenArray[group], "BL" ) == 0 )
+									strcpy( newNode.regNum, "011" ), newNode.regByte = 1 ;
+								else if( strcmp( temp.tokenArray[group], "BX" ) == 0 )
+									strcpy( newNode.regNum, "011" ), newNode.regByte = 2 ;
+								else if( strcmp( temp.tokenArray[group], "CH" ) == 0 )
+									strcpy( newNode.regNum, "101" ), newNode.regByte = 1 ;
+								else if( strcmp( temp.tokenArray[group], "CL" ) == 0 )
+									strcpy( newNode.regNum, "001" ), newNode.regByte = 1 ;
+								else if( strcmp( temp.tokenArray[group], "CX" ) == 0 )
+									strcpy( newNode.regNum, "001" ), newNode.regByte = 2 ;
+								else if( strcmp( temp.tokenArray[group], "DH" ) == 0 )
+									strcpy( newNode.regNum, "110" ), newNode.regByte = 1 ;
+								else if( strcmp( temp.tokenArray[group], "DL" ) == 0 )
+									strcpy( newNode.regNum, "010" ), newNode.regByte = 1 ;
+								else if( strcmp( temp.tokenArray[group], "DX" ) == 0 )
+									strcpy( newNode.regNum, "010" ), newNode.regByte = 2 ;	
+								else if( strcmp( temp.tokenArray[group], "SP" ) == 0 )
+									strcpy( newNode.regNum, "100" ), newNode.regByte = 2 ;
+								else if( strcmp( temp.tokenArray[group], "BP" ) == 0 )
+									strcpy( newNode.regNum, "101" ), newNode.regByte = 2 ;
+								else if( strcmp( temp.tokenArray[group], "SI" ) == 0 )
+									strcpy( newNode.regNum, "110" ), newNode.regByte = 2 ;
+								else 
+									strcpy( newNode.regNum, "111" ), newNode.regByte = 2 ;
+								cout << "  TYPE=>" << newNode.type << "\n  NO=>" << newNode.regNum << "\n  BYTE=>" << newNode.regByte << endl;
+							}
+						}
+						//value
+						else if( temp.tokenTableArray[group] == VALUE ){
+							newNode.type = VALUE ;
+							int i = 0 ;
+							strcpy( newNode.value, "\0" ) ;
+							cout << newNode.value ;
+							for( i = 0 ; i < strlen( temp.tokenArray[group] ) ; i++ ){
+								if( temp.tokenArray[group][i] != 'H' )
+									newNode.value[i] = temp.tokenArray[group][i] ;
+							}
+							//strcpy( newNode.value, temp.tokenArray[group] ) ;  
+							cout << "  TYPE=>" << newNode.type << "\n  VALUE=>" << newNode.value ;
+						}
+						else if( temp.tokenTableArray[group] == LABEL ){
+							newNode.type = LABEL ;
+							strcpy( newNode.memSymbol, temp.tokenArray[group] ) ;
+							cout << "  TYPE=>" << newNode.type << "\n  SYMBOL=>" << newNode.memSymbol ;
+						}
+						else{
+							cout << "We don't need this!! " << endl ;
+						}
+					} 
+					// 標點符號 
+					else if( temp.tokenTableArray[group] == DEL ){
+						
+					}
+					// string 
+					else if( temp.tokenTableArray[group] == STR ){
+						newNode.type = STR ;
+						strcpy( newNode.value, temp.tokenArray[group] ) ;
+					}
+					//memory
+					else{
+						newNode.type = MEMORY ;
+						cout << "  TYPE=>" << newNode.type << endl ;
+						// symbol
+						if( temp.tokenTableArray[group] == LABEL || temp.tokenTableArray[group] == PSEUDO ){
+							strcpy( newNode.memSymbol, temp.tokenArray[group] ) ;
+							cout << "  memSymbol=>" << newNode.memSymbol << endl ;
+							//direct address
+							strcpy( newNode.memRm, "110" ) ;
+							strcpy( newNode.memMode, "00" ) ;
+							newNode.R = 1 ;	
+						} 
+						// sreg
+						else if( temp.tokenTableArray[group] == SREG ){
+							newNode.memSeg = strtol( temp.tokenArray[group], NULL, 16 );
+							cout << "  memSeg=>" << newNode.memSeg << endl ;	
+						}
+						// integer
+						else if( temp.tokenTableArray[group] == VALUE ){
+							newNode.memDisp = strtol( temp.tokenArray[group], NULL, 16 );
+							cout << "  memDisp=>" << newNode.memDisp << endl ;	
+						}
+						else if( temp.tokenArray[group] == "[" ){
+						//ex.[ BX + DATA1 + 1234H ]
+							//處理memMode、memRM 
+						}
+					}
+				}
+				divideRemain.push_back( newNode ) ;
+				cout << endl ;
+			}
+		}
+		vector<classify_group> getResult(){
+			return divideRemain ;
+		}
+};
+class Classify_ins_lab{
+	private:
+		vector<classified1> divideInsLab ;
+		Translator translator ;
+	public:
+		Classify_ins_lab(){
+		
+		} 
+		// 分出每一行的instruction和label 
+		void packer( vector<aLineOfToken> allToken ){
+			int startingAddress = 0 ;
+			for( int i = 0 ; i < allToken.size() ; i++ ){
+				classified1 newNode ;	
+				newNode.remain.amount = 0 ;
+				bool throughINS = false ;
+				for( int j = 0, throughINS = false ; j < allToken[i].amount ; j++ ){
+					if( allToken[i].tokenTableArray[j] == INSTRUCTION && !throughINS ) {
+						throughINS = true ;
+						strcpy( newNode.instruction, allToken[i].tokenArray[j] ) ;
+						cout << "INS : " << allToken[i].tokenArray[j] << endl ;
+					}
+					else if( allToken[i].tokenTableArray[j] == PSEUDO && !throughINS ) {
+						throughINS = true ;
+						strcpy( newNode.instruction, allToken[i].tokenArray[j] ) ;
+						cout << "PSEUDO : " << allToken[i].tokenArray[j] << endl ;
+					}
+					else if( allToken[i].tokenTableArray[j] == LABEL && !throughINS ){
+						strcpy( newNode.label, allToken[i].tokenArray[j] ) ;
+						cout << "LABEL : " << allToken[i].tokenArray[j] << endl ;
+					}
+					else{
+						newNode.remain.amount++ ;
+						strcpy( newNode.remain.tokenArray[newNode.remain.amount-1], allToken[i].tokenArray[j] ) ;
+						newNode.remain.tokenTableArray[newNode.remain.amount-1] = allToken[i].tokenTableArray[j] ;
+						
+					}
+				}
+				Classify_remain classify_remain ;
+				if( newNode.remain.amount != 0 ){
+					//切割operand 	
+					classify_remain.packer( newNode.remain ) ;				
+				}
+				//轉機器碼 
+				translator.translate( allToken[i].originLine, newNode, classify_remain.getResult() ) ;
+				//塞進vector 
+				divideInsLab.push_back( newNode ) ;
+				throughINS = false ;
+
+			}
+			// 歸位所有指令位置 
+			translator.addAddress() ; 
+			translator.addForwardRef() ;
+			// 輸出(先不管forward_ref) 
+			translator.PrintResult() ;
+			
+		}
+
+};
+class Deal {	
+	private:
+		fstream file ;
+		string fileName ;
+		int size ;  
+		// 存指令在table位置 (作業1結果)
+		vector<aLineOfToken> allToken ;
+		// table
+		vector<tableNode> table5 ;
+		vector<tableNode> table6 ;
+		vector<tableNode> table7 ;
+	public:
+		Deal(){
+			fileName = "";
+			size = 0 ;
+		}
+		int openFile(){
+			cout << "\nInput a file name: ";
+			cin >> fileName ;
+			char ch ;
+			scanf( "%c", &ch );
+			file.open( fileName.c_str(), ios::in );
+			if ( !file ){
+				cout << "\n### " << fileName << " does not exist! ###\n" ;
+				return 2 ;
+			}
+			return 1 ;
+		}
+		bool ReadIn(  ){
+			table5.resize(99) ;
+			table6.resize(99) ;
+			table7.resize(99) ;
+			string line ;
+			int number = 1;
+			if ( !getline( file, line ) ){
+				cout << "\n### Get nothing from the file " << fileName << " ! ###" << "\n" << endl ;
+				file.close();
+				return false ;
+			}
+			//丟進去 
+			Divide( line );
+			for ( number++ ; getline( file, line ) ; number++ )
+				Divide( line );
+			file.close();
+			outTable() ;
+			Classify_ins_lab classify_ins_lab ;
+			classify_ins_lab.packer( allToken ) ;
+			cout << "\nFile output is successful.\n\n" ; 
+			return true ;
+		}
+		void Divide( string line ){
+			int now = 0 ;
+			string temp ;
+			bool isComment = false, isString = false, isNewLine = true ;
+			for( now = 0, isNewLine = true ; now < line.length() ; ){
+				temp = "\0" ;
+				if( isComment )
+				//接下來都註解 
+					break ;
+				else if( isString && line[now] != 39 ){
+					while( now < line.length() && line[now] != 39 ){
+						temp = temp + line[now] ;
+						now++ ;						
+					}
+					FindTable( temp, isString, isNewLine, line ) ;
+				}
+				else if( line[now] == ' ' || line[now] == '\t' || line[now] == '\n' )
+				// 空白，直接換下一個 
+					now++;	
+				else if(( line[now] >= 'a'&& line[now] <= 'z' )||( line[now] >='A' && line[now] <= 'Z')||( line[now] <= 57 && line[now] >= 48 )){
+				// 字母、數字(指令、暫存器)
+					while(( line[now] >= 'a'&& line[now] <= 'z' )||( line[now] >='A' && line[now] <= 'Z')||( line[now] <= 57 && line[now] >= 48 )){
+						temp = temp + line[now] ;
+						now++ ;
+					} 
+					FindTable( temp, isString, isNewLine, line ) ;
+					isNewLine = false ;
+				}
+				else{
+				// 符號 
+					if( line[now] == ';' ) 
+						isComment = true ;
+					else if( line[now] == 39 ){
+					// 是' -> 為string 放7table 
+						if( isString )
+							isString = false ;
+						else
+							isString = true ;
+					}
+					temp = temp + line[now] ;
+					FindTable( temp, isString, isNewLine, line ) ;
+					now++ ;
+					isNewLine = false ;
+				}
+			}
+		}
+		void FindTable( string temp, bool isString, bool isNewLine, string line ){
+			
+			bool isFound = false ;
+			// 紀錄5~7的table標號(5->symbol、6->interger、7->message) 
+			string tableNum ;
+			if( isString )
+				tableNum = "7" ;
+			else if( temp[0] <= 57 && temp[0] >= 48 ){ 
+			// 結尾是H 或整行都數字 才是integer
+				bool isInt = true ;
+				for( int i = 0 ; i < temp.length()-1 ; i++ )
+					if( temp[i] > 57 || temp[i] < 48 )
+						isInt = false ;
+				if( !isInt ){
+					if( temp[temp.length()-1] == 'H' )
+						tableNum = "6" ;
+					else
+						tableNum = "5" ;
+				}
+				else
+					tableNum = "6" ;
+			}
+			else
+				tableNum = "5" ;
+			// 找table 
+			for( string number = "1" ; isFound == false ; number[0]++ ){
+				if ( ( number[0] - 48 ) > 4 ){
+				//此token 不存在前4個table 
+					HashFunction( temp, tableNum, isNewLine, line ) ;
+					isFound = true ;
+				}
+				else{
+					//看有沒有在裡面
+					//開檔 
+					fstream tableFile ;
+					string tableName = "Table" + number + ".table";
+					tableFile.open( tableName.c_str(), ios::in );
+					string sample ;
+					for( int i = 1 ; getline( tableFile, sample ) && isFound == false ; i++ )
+						//不管大小寫 
+						if( strcasecmp( sample.c_str(), temp.c_str() ) == 0 ){
+							Print( number[0] - 48, i, isNewLine, temp, line ) ;
+							isFound = true ;
+						}
+					tableFile.close();
+				} 
+			}
+		}
+		void outTable(){
+			//輸出table5~7 
+			fstream tableFile ;
+			tableFile.open( "Table5.table", fstream::out );
+			for( int i = 0 ; i < 99 ; i++ )
+				tableFile << table5[i].content << endl ;
+			tableFile.close();
+			
+			tableFile.open( "Table6.table", fstream::out );
+			for( int i = 0 ; i < 99 ; i++ )
+				tableFile << table6[i].content << endl ;
+			tableFile.close();
+			
+			tableFile.open( "Table7.table", fstream::out );
+			for( int i = 0 ; i < 99 ; i++ )
+				tableFile << table7[i].content << endl ;
+			tableFile.close();
+		}
+		void HashFunction( string temp, string tableNum, bool isNewLine, string line ){
+			
+			tableNode tempNode ;
+			tempNode.content = temp ;
+
+			// 找位置 
+			int position = 0 ;
+			for( int i = 0 ; i < temp.length() ; i++ )
+				position = position + temp[i] ;
+			while( position > 99 || position < 0 )
+				position = position % 100 ;
+			
+			bool isFound = false ;
+			// table5
+			while( isFound == false && tableNum == "5" ){
+				if( table5[position].content.compare( "\0" ) == 0 ){ 
+				// 放進去
+					table5[position] = tempNode ;				
+					Print( (tableNum[0] - 48), position, isNewLine, temp, line ) ;
+					isFound = true ;
+				}	
+				else if( table5[position].content.compare( temp ) == 0 ){ 
+				// 已經在裡面了(大小寫也要判斷)，印出位置 
+					Print( (tableNum[0] - 48), position, isNewLine, temp, line ) ;
+					isFound = true ;
+				}
+				else{
+				// 有人了，找下一個位置 
+					if( position < 99 )
+						position++ ;
+					else 
+						position = 0 ;
+				}		 
+			}
+			// table6
+			while( isFound == false && tableNum.compare( "6" ) == 0 ){
+				if( table6[position].content.compare( "\0" ) == 0 ){ 
+				// 放進去
+					table6[position] = tempNode ;
+					Print( (tableNum[0] - 48), position, isNewLine, temp, line ) ;
+					isFound = true ;
+				}	
+				else if( table6[position].content.compare( temp ) == 0 ){ 
+				// 已經在裡面了(大小寫也要判斷)，印出位置 
+					Print( (tableNum[0] - 48), position, isNewLine, temp, line ) ;
+					isFound = true ;
+				}
+				else{
+				// 有人了，找下一個位置 
+					if( position < 99 )
+						position++ ;
+					else 
+						position = 0 ;
+				}
+				 
+			}
+			// table7
+			while( isFound == false && tableNum.compare( "7" ) == 0 ){
+				if( table7[position].content.compare( "\0" ) == 0 ){ 
+				// 放進去
+					table7[position] = tempNode ;
+					Print( (tableNum[0] - 48), position, isNewLine, temp, line ) ;
+					isFound = true ;
+				}	
+				else if( table7[position].content.compare( temp ) == 0 ){ 
+				// 已經在裡面了(大小寫也要判斷)，印出位置 
+					Print( (tableNum[0] - 48), position, isNewLine, temp, line ) ;
+					isFound = true ;
+				}
+				else{
+				// 有人了，找下一個位置 
+					if( position < 99 )
+						position++ ;
+					else 
+						position = 0 ;
+				}
+				 
+			}
+		}
+		void Print( int table, int index, bool isNewLine, string temp, string origin ){
+			// 放進暫存 
+			if( isNewLine ){
+				aLineOfToken newNode ;
+				strcpy( newNode.originLine, origin.c_str() ) ;
+				newNode.amount = 1 ;
+				strcpy( newNode.tokenArray[0], temp.c_str() ) ;
+				newNode.tokenTableArray[0] = table ;	
+				allToken.push_back( newNode ) ;	
+			}
+			else{
+				allToken[allToken.size()-1].amount++ ;
+				strcpy( allToken[allToken.size()-1].tokenArray[allToken[allToken.size()-1].amount-1], temp.c_str() ) ;
+				allToken[allToken.size()-1].tokenTableArray[allToken[allToken.size()-1].amount-1] = table ;
+			}	
+
+		}
+};
+int main() {
+	
+	Tool tool ;
+	Deal deal ;
+	int option, status ;
+	do{ 
+		cout << "Please enter an option[0 quit 1 start]:" ;
+		option = tool.GetInt() ;
+		if( option == 1 ){
+			status = deal.openFile();
+			while ( status == 2 )
+				status = deal.openFile();
+			if ( status == 1 ){
+				if ( deal.ReadIn() )
+					;
+			}
+		}
+	}while( option != 0 );
+
+	return 0;
+}
